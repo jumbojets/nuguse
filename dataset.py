@@ -14,28 +14,23 @@ def load_data(train_sequences_path, train_labels_path, min_len_filter, max_len_f
 
   all_xyz = []
   for pdb_id in tqdm(train_sequences["target_id"], desc="Collecting XYZ data"):
-      df = train_labels[train_labels["pdb_id"] == pdb_id]
-      xyz = df[["x_1", "y_1", "z_1"]].to_numpy().astype("float32")
-      xyz[xyz < -1e17] = float("nan")
-      all_xyz.append(xyz)
+    df = train_labels[train_labels["pdb_id"] == pdb_id]
+    xyz = df[["x_1", "y_1", "z_1"]].to_numpy().astype("float32")
+    xyz[xyz < -1e17] = float("nan")
+    all_xyz.append(xyz)
   
   valid_indices = []
   max_len_seen = 0
 
   for i, xyz in enumerate(all_xyz):
-      # Track the maximum length
-      if len(xyz) > max_len_seen:
-          max_len_seen = len(xyz)
+    if len(xyz) > max_len_seen: max_len_seen = len(xyz)
 
-      nan_ratio = np.isnan(xyz).mean()
-      seq_len = len(xyz)
-      # Keep sequence if it meets criteria
-      if (nan_ratio <= 0.5) and (min_len_filter < seq_len < max_len_filter):
-          valid_indices.append(i)
+    nan_ratio = np.isnan(xyz).mean()
+    seq_len = len(xyz)
+    if (nan_ratio <= 0.5) and (min_len_filter < seq_len < max_len_filter): valid_indices.append(i)
 
   print(f"Longest sequence in train: {max_len_seen}")
 
-  # Filter sequences & xyz based on valid_indices
   train_sequences = train_sequences.loc[valid_indices].reset_index(drop=True)
   all_xyz = [all_xyz[i] for i in valid_indices]
 

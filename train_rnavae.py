@@ -93,6 +93,7 @@ latent_dim = 64
 lr = 1e-4
 accum_steps = 2
 num_epochs = 5000
+checkpoint_every = 500
 load = "rna3d_vae.pt"
 
 model = RNA3d_VAE(d_model, num_layers, latent_dim).to(device)
@@ -159,6 +160,8 @@ for epoch in range(1, num_epochs + 1):
   plt.pause(0.01)   # brief GUI event flush
 
   print(f"Epoch {epoch:3d}/{num_epochs}  {train_loss=:.3f}  {val_loss=:.3f}  {val_sigma=:.3f}  {val_rec=:.3f}  {val_kl=:.3f}  {elapsed=:.3f}s")
+
+  if epoch == num_epochs or epoch % checkpoint_every == 0: torch.save(model.state_dict(), f"rna3d_vae_{epoch:04d}-{num_epochs}")
 
 torch.save(model.state_dict(), "rna3d_vae.pt")
 
