@@ -65,11 +65,12 @@ def rand_rot3d(dtype=torch.float32):
   ], dtype=dtype)
 
 class RNA3D_Dataset(Dataset):
-  def __init__(self, indices, data_dict, max_len=384):
+  def __init__(self, indices, data_dict, max_len=384, rotate=False):
     self.indices = indices
     self.data = data_dict
     self.max_len = max_len
     self.nt_to_idx = {nt: i for i, nt in enumerate("ACGU")}
+    self.rotate = rotate
 
   def __len__(self): return len(self.indices)
   
@@ -79,7 +80,7 @@ class RNA3D_Dataset(Dataset):
     seq = torch.tensor(seq, dtype=torch.long)        # [seq_len]
     xyz = torch.as_tensor(self.data["xyz"][data_idx], dtype=torch.float32)  # [seq_len, 3]
     xyz[torch.isnan(xyz)] = 0.0
-    xyz = xyz @ rand_rot3d(dtype=torch.float32).to(xyz.device).T # apply random rotation in SO(3)
+    if self.rotate: xyz = xyz @ rand_rot3d(dtype=torch.float32).to(xyz.device).T
 
     seq_len = len(seq)
     if seq_len > self.max_len:
