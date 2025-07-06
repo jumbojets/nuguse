@@ -15,6 +15,47 @@ class PositionalEncoding(nn.Module):
   
   def forward(self, x): return x + self.pe[:, : x.size(1)]
 
+class VectorQuantizer(nn.Module):
+  def __init__(self, num_embeddings, embedding_dim, commitment_cost=0.25):
+    super().__init__()
+    self.embedding_dim = embedding_dim
+    self.num_embeddings = num_embeddings
+    self.commitment_cost = commitment_cost
+
+    self.embedding = nn.Embedding(num_embeddings, embedding_dim)
+    self.embedding.weight.data.uniform_(-1/self.num_embeddings, 1/self.num_embeddings)
+
+  def forward(self, inputs):
+    # inputs: (B, L, D)
+    input_shape = inputs.shape
+    flat_input = inputs.view(-1, self.embedding_dim)  # (B*L, D)
+
+    distances = (
+      torch.sum(flat_input**2, dim=1, keepdim=True)
+      + torch.sum(self.embedding.weight**2, dim=1)
+      - 2 * torch.matmul(flat_input, self.embedding.weight.t())
+    )  # (B*L, num_embeddings)
+
+    encoding_indices = torch.argmin(distances, dim=1).unsqueeze(1)  # (B*L, 1)
+    encodings = torch.zeros(encoding_indices.size(0), self.num_embeddings, device=inputs.device)
+    encodings.scatter_(1, encoding_indices, 1)  # one-hot (B*L, num_embeddings)
+
+    quantized = torch.matmul(encodings, self.embedding.weight)  # (B*L, D)
+    quantized = quantized.view(input_shape)  # (B, L, D)
+
+    # Straight-through estimator
+    quantized = inputs + (quantized - inputs).detach()
+
+    # Compute losses
+    e_latent_loss = torch.mean((quantized.detach() - inputs) ** 2)
+    q_latent_loss = torch.mean((quantized - inputs.detach()) ** 2)
+    loss = q_latent_loss + self.commitment_cost * e_latent_loss
+
+    avg_probs = torch.mean(encodings, dim=0)
+    perplexity = torch.exp(-torch.sum(avg_probs * torch.log(avg_probs + 1e-10)))
+
+    return quantized, loss, perplexity
+
 class RNA3d_Encoder(nn.Module):
   def __init__(self, d_model, num_layers, latent_dim):
     super().__init__()
@@ -22,15 +63,14 @@ class RNA3d_Encoder(nn.Module):
     self.pos_enc = PositionalEncoding(d_model)
     enc_layer = nn.TransformerEncoderLayer(d_model=d_model, nhead=4, dim_feedforward=d_model*4, dropout=0.1, batch_first=True)
     self.encoder = nn.TransformerEncoder(enc_layer, num_layers=num_layers)
-    self.fc_mu = nn.Linear(d_model, latent_dim)
-    self.fc_logv = nn.Linear(d_model, latent_dim)
+    self.fc = nn.Linear(d_model, latent_dim)
 
   def forward(self, x):
     h = self.input_proj(x)
     h = self.pos_enc(h)
     h = self.encoder(h)
-    pooled = h.mean(dim=1)
-    return self.fc_mu(pooled), self.fc_logv(pooled).clamp(-10.0, 10.0)
+    z_e = self.fc(h)  # (B, L, latent_dim)
+    return z_e
 
 class RNA3d_Decoder(nn.Module):
   def __init__(self, d_model, num_layers, latent_dim):
@@ -50,36 +90,28 @@ class RNA3d_Decoder(nn.Module):
     h = self.decoder(tgt=tgt, memory=memory)
     return self.output_proj(h)
 
-class RNA3d_VAE(nn.Module):
-  def __init__(self, d_model=128, num_layers=4, latent_dim=32):
+class RNA3d_VQVAE(nn.Module):
+  def __init__(self, d_model=128, num_layers=4, latent_dim=32, num_embeddings=512, commitment_cost=0.25):
     super().__init__()
     self.encoder = RNA3d_Encoder(d_model, num_layers, latent_dim)
+    self.vq_layer = VectorQuantizer(num_embeddings, latent_dim, commitment_cost)
     self.decoder = RNA3d_Decoder(d_model, num_layers, latent_dim)
 
-  def encode(self, x): return self.encoder(x)
+  def encode(self, x):
+    z_e = self.encoder(x).mean(dim=1)  # Pool over length
+    z_q, vq_loss, perplexity = self.vq_layer(z_e.unsqueeze(1))
+    z_q = z_q.squeeze(1)
+    return z_q, vq_loss, perplexity
+
   def decode(self, z, seq_len): return self.decoder(z, seq_len)
 
-  @staticmethod
-  def reparameterize(mu, logvar):
-    std = torch.exp(0.5 * logvar)
-    eps = torch.randn_like(std)
-    return mu + eps * std
-
   def forward(self, x):
-    mu, logvar = self.encode(x)
-    z = self.reparameterize(mu, logvar)
-    recon = self.decode(z, x.size(1))
-    return recon, mu, logvar
-  
-def kl_with_free_bits(mu, logvar, global_step, bits=0.05):
-  kl = -0.5 * (1 + logvar - mu.pow(2) - logvar.exp())
-  kl = torch.clamp(kl, min=bits)
-  beta = min(global_step / 2000, 1.0)
-  return beta * kl.mean(), kl.mean()
+    z_q, vq_loss, perplexity = self.encode(x)
+    recon = self.decode(z_q, x.size(1))
+    return recon, vq_loss, perplexity
 
-def vae_loss(recon_x, x, recon_sigma, target_sigma, mask, mu, logvar, global_step, sigma_weight=0.1, kl_weight=1):
+def vae_loss(recon_x, x, recon_sigma, target_sigma, mask, vq_loss, global_step, sigma_weight=0.1, kl_weight=0.1):
   mse = ((recon_x - x) ** 2).sum(-1)   # [B,L]
   recon_loss = ((mse * mask).sum(dim=1) / mask.sum(dim=1)).mean()
   sigma_loss = torch.mean((recon_sigma - target_sigma) ** 2)
-  kl_beta, kl_loss = kl_with_free_bits(mu, logvar, global_step)
-  return recon_loss + sigma_weight * sigma_loss + kl_beta, recon_loss, sigma_loss, kl_loss
+  return recon_loss + sigma_weight * sigma_loss + kl_weight * vq_loss, recon_loss, sigma_loss, vq_loss

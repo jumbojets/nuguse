@@ -6,9 +6,11 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 
 import dataset
-from rnavae import RNA3d_VAE, vae_loss
+from rnavae import RNA3d_VQVAE, vae_loss
 
-batch_size = 8
+torch.set_float32_matmul_precision('medium')
+
+batch_size = 16
 max_len = 384
 min_length_filter = 10
 max_length_filter = 9999999
@@ -21,7 +23,7 @@ pretrained_weights_path = "ribonanzanet-weights/RibonanzaNet.pt"
 data = dataset.load_data(train_sequences_path, train_labels_path, min_length_filter, max_length_filter)
 train_indices, test_indices = dataset.train_val_split(data, cutoff_date, test_cutoff_date)
 
-train_dataset = dataset.RNA3D_Dataset(train_indices, data, max_len=max_len, rotate=True)
+train_dataset = dataset.RNA3D_Dataset(train_indices, data, max_len=max_len, rotate=False)
 val_dataset = dataset.RNA3D_Dataset(test_indices, data, max_len=max_len)
 
 train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
@@ -32,6 +34,7 @@ train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
 
 val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
 
+@torch.compile
 def train_epoch(model, loader, optimizer, device, accum_steps, epoch):
   model.train()
   running_loss = 0.0
@@ -60,6 +63,7 @@ def train_epoch(model, loader, optimizer, device, accum_steps, epoch):
   
   return running_loss / len(loader)
 
+@torch.compile
 def valid_loss(model, loader, device, epoch):
   model.eval()
   tot_loss = tot_recon_l = tot_sigma_l = tot_kl_l = 0.0
@@ -91,12 +95,13 @@ d_model = 256
 num_layers = 5
 latent_dim = 64
 lr = 1e-4
-accum_steps = 2
+accum_steps = 1
 num_epochs = 5000
 checkpoint_every = 500
-load = "rna3d_vae.pt"
+# load = "rna3d_vae_0500-5000.pt"
+load = None
 
-model = RNA3d_VAE(d_model, num_layers, latent_dim).to(device)
+model = RNA3d_VQVAE(d_model, num_layers, latent_dim).to(device)
 optimizer = optim.Adam(model.parameters(), lr=lr)
 
 if load is not None: model.load_state_dict(torch.load(load, weights_only=True))
@@ -158,10 +163,11 @@ for epoch in range(1, num_epochs + 1):
   ax1.relim(); ax1.autoscale_view()
   ax2.relim(); ax2.autoscale_view()
   plt.pause(0.01)   # brief GUI event flush
+  plt.savefig("train.png")
 
   print(f"Epoch {epoch:3d}/{num_epochs}  {train_loss=:.3f}  {val_loss=:.3f}  {val_sigma=:.3f}  {val_rec=:.3f}  {val_kl=:.3f}  {elapsed=:.3f}s")
 
-  if epoch == num_epochs or epoch % checkpoint_every == 0: torch.save(model.state_dict(), f"rna3d_vae_{epoch:04d}-{num_epochs}")
+  if epoch == num_epochs or epoch % checkpoint_every == 0: torch.save(model.state_dict(), f"rna3d_vae_{epoch:04d}-{num_epochs}.pt")
 
 torch.save(model.state_dict(), "rna3d_vae.pt")
 
@@ -173,3 +179,11 @@ torch.save(model.state_dict(), "rna3d_vae.pt")
 #Start with per-residue loss for stability; after N epochs switch to per-molecule to fine-tune global shape.
 #Task-weighted mix
 #Total loss = \alpha\,L_\text{per-res} + (1-\alpha)\,L_\text{per-mol}.  Pick α≈0.7 so both signals are present
+
+
+# VQ-VAE
+# REMUL (https://arxiv.org/html/2410.17878v1#S1)
+# GAN critic loss
+# perception loss
+# Aux decoder (https://sander.ai/images/aux_decoder.png)
+
